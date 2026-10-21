@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: The uwuAOSP Project
+# SPDX-License-Identifier: Apache-2.0
+
+name: ThemePicker standalone APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "SOURCE_REVISIONS"
+      - "vendor/uwu-ci/packages/apps/ThemePicker/**"
+      - "vendor/uwu-ci/common/**"
+      - ".github/workflows/packages_apps_ThemePicker.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      AOSP_SOURCE_ROOT: ${{ github.workspace }}/aosp-sources
+      AOSP_PREBUILTS_SDK: ${{ github.workspace }}/prebuilts/sdk
+      AOSP_FRAMEWORK_JAR: ${{ github.workspace }}/vendor/uwu-ci/common/platforms/framework.jar
+      AOSP_FRAMEWORK_RES: ${{ github.workspace }}/vendor/uwu-ci/common/platforms/framework-res.apk
+      AOSP_SYSTEM_LIBS_DIR: ${{ github.workspace }}/vendor/uwu-ci/packages/apps/ThemePicker/system_libs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android build tools
+        run: |
+          sdkmanager \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0" \
+            "ndk;25.0.8775105" \
+            "cmake;3.22.1"
+
+      - name: Check out pinned AOSP sources
+        run: bash vendor/uwu-ci/common/checkout-theme-picker-sources.sh "$AOSP_SOURCE_ROOT"
+
+      - name: Check out AOSP AndroidX Maven artifacts
+        run: bash vendor/uwu-ci/common/checkout-aosp-sdk.sh "$AOSP_PREBUILTS_SDK"
+
+      - name: Build unsigned APK
+        working-directory: vendor/uwu-ci/packages/apps/ThemePicker
+        run: ./gradlew --no-daemon :app:assembleRelease --console=plain
+
+      - name: Upload unsigned APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ThemePicker-${{ github.run_number }}-unsigned
+          path: vendor/uwu-ci/packages/apps/ThemePicker/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error

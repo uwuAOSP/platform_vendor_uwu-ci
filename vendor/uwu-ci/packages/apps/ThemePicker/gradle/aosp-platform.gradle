@@ -1,0 +1,138 @@
+/*
+ * SPDX-FileCopyrightText: The uwuAOSP Project
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import org.gradle.api.tasks.compile.JavaCompile
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+
+def sharedPlatformDir = rootProject.file("../../../common")
+def platformPropertiesFile = new File(sharedPlatformDir, "platform.properties")
+if (!platformPropertiesFile.isFile()) {
+    throw new GradleException("Missing shared platform metadata: ${platformPropertiesFile}")
+}
+
+def platformProperties = new Properties()
+platformPropertiesFile.withInputStream { platformProperties.load(it) }
+
+def defaultFrameworkJar = rootProject.file("../../../common/platforms/framework.jar")
+def defaultFrameworkRes = rootProject.file("../../../common/platforms/framework-res.apk")
+def frameworkJar = System.getenv("AOSP_FRAMEWORK_JAR") != null
+        ? rootProject.file(System.getenv("AOSP_FRAMEWORK_JAR"))
+        : defaultFrameworkJar
+def frameworkRes = System.getenv("AOSP_FRAMEWORK_RES") != null
+        ? rootProject.file(System.getenv("AOSP_FRAMEWORK_RES"))
+        : defaultFrameworkRes
+def sdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+if (sdkRoot == null) {
+    throw new GradleException("ANDROID_HOME or ANDROID_SDK_ROOT is required")
+}
+def androidJar = new File(sdkRoot, "platforms/android-37/android.jar")
+if (!androidJar.isFile()) {
+    androidJar = new File(sdkRoot, "platforms/android-37.0/android.jar")
+}
+def standalonePlatformJar = rootProject.layout.buildDirectory.file("generated/aosp-platform/android.jar")
+def expectedSha256 = platformProperties.getProperty("frameworkSha256")
+def expectedFrameworkResSha256 = platformProperties.getProperty("frameworkResSha256")
+if (!frameworkJar.isFile()) {
+    throw new GradleException("Missing shared framework.jar: ${frameworkJar}")
+}
+if (!frameworkRes.isFile()) {
+    throw new GradleException("Missing framework-res.apk: ${frameworkRes}")
+}
+if (!androidJar.isFile()) {
+    throw new GradleException("Missing Android API 37 android.jar under ${sdkRoot}/platforms")
+}
+if (expectedSha256 == null || expectedSha256.trim().isEmpty()) {
+    throw new GradleException("Missing frameworkSha256 in ${platformPropertiesFile}")
+}
+if (expectedFrameworkResSha256 == null || expectedFrameworkResSha256.trim().isEmpty()) {
+    throw new GradleException("Missing frameworkResSha256 in ${platformPropertiesFile}")
+}
+
+def actualSha256 = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(frameworkJar.bytes)
+        .collect { String.format("%02x", it & 0xff) }
+        .join()
+if (!actualSha256.equalsIgnoreCase(expectedSha256)) {
+    throw new GradleException(
+            "Shared framework.jar checksum mismatch: " +
+                    "expected ${expectedSha256}, got ${actualSha256}")
+}
+
+def actualFrameworkResSha256 = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(frameworkRes.bytes)
+        .collect { String.format("%02x", it & 0xff) }
+        .join()
+if (!actualFrameworkResSha256.equalsIgnoreCase(expectedFrameworkResSha256)) {
+    throw new GradleException(
+            "framework-res.apk checksum mismatch: " +
+                    "expected ${expectedFrameworkResSha256}, got ${actualFrameworkResSha256}")
+}
+
+dependencies.add("compileOnly", files(frameworkJar))
+
+def prepareStandalonePlatformJar = rootProject.tasks.findByName("prepareStandalonePlatformJar")
+if (prepareStandalonePlatformJar == null) {
+    prepareStandalonePlatformJar = rootProject.tasks.register("prepareStandalonePlatformJar") {
+        inputs.file(frameworkJar)
+        inputs.file(androidJar)
+        outputs.file(standalonePlatformJar)
+        doLast {
+            def output = standalonePlatformJar.get().asFile
+            output.parentFile.mkdirs()
+            def frameworkClasses = new LinkedHashMap<String, byte[]>()
+            new ZipFile(frameworkJar).withCloseable { zip ->
+                zip.entries().each { entry ->
+                    if (!entry.directory &&
+                            (entry.name.startsWith("android/") || entry.name.startsWith("com/android/internal/")) &&
+                            entry.name.endsWith(".class")) {
+                        frameworkClasses[entry.name] = zip.getInputStream(entry).withCloseable { it.bytes }
+                    }
+                }
+            }
+            new ZipOutputStream(new FileOutputStream(output)).withCloseable { out ->
+                def written = new HashSet<String>()
+                frameworkClasses.each { name, bytes ->
+                    out.putNextEntry(new ZipEntry(name))
+                    out.write(bytes)
+                    out.closeEntry()
+                    written.add(name)
+                }
+                new ZipFile(androidJar).withCloseable { zip ->
+                    zip.entries().each { entry ->
+                        if (!entry.directory && !written.contains(entry.name) &&
+                                !entry.name.startsWith("META-INF/")) {
+                            out.putNextEntry(new ZipEntry(entry.name))
+                            zip.getInputStream(entry).withCloseable { it.transferTo(out) }
+                            out.closeEntry()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+android.androidResources.additionalParameters += ["-I", frameworkRes.absolutePath]
+
+gradle.projectsEvaluated {
+    tasks.withType(JavaCompile).configureEach {
+        dependsOn(prepareStandalonePlatformJar)
+        classpath = files(standalonePlatformJar) + classpath.filter {
+            it.canonicalFile != frameworkJar.canonicalFile && it.name != "android.jar"
+        }
+    }
+}
+
+tasks.configureEach { task ->
+    if (task.name.toLowerCase().contains("kotlin") && task.hasProperty("libraries")) {
+        task.libraries.setFrom(
+                files(standalonePlatformJar) + task.libraries.filter {
+                    it.canonicalFile != frameworkJar.canonicalFile && it.name != "android.jar"
+                })
+        task.dependsOn(prepareStandalonePlatformJar)
+    }
+}

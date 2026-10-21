@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: The uwuAOSP Project
+# SPDX-License-Identifier: Apache-2.0
+
+/prebuilts/sdk/
+/vendor/uwu-ci/packages/apps/ThemePicker/.gradle/
+/vendor/uwu-ci/packages/apps/ThemePicker/.kotlin/
+/vendor/uwu-ci/packages/apps/ThemePicker/**/build/
+/vendor/uwu-ci/packages/apps/ThemePicker/app/.cxx/
